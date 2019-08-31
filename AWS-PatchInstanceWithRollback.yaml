@@ -1,0 +1,188 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AWS-PatchInstanceWithRollBack lambda
+
+Parameters:
+
+  ArtifactBucketName:
+    Type: String
+    Description: Base URL for artifacts in S3. From deployspec compiler.
+
+  ArtifactKeyPrefix:
+    Type: String
+    Description: Build path prefix for this app. From deployspec compiler.
+
+  LambdaFunctionNamePrefix:
+    Type: String
+
+  AssumeRoleName:
+    Type: String
+
+  SSMDocumentName:
+    Type: String
+
+  hotfixBaseStack:
+    Type: String
+
+Conditions:
+
+  AutomationAccount: !Equals [ Ref: 'AWS::AccountId', '234343' ] # Automation
+  OtherAccounts:
+    Fn::Not:
+      - Fn::Equals: [ Ref: 'AWS::AccountId', '234312' ] # prod-auto
+
+
+Resources:
+
+  PatchInstanceWithRollBackAssumeRole:
+    Condition: OtherAccounts
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref AssumeRoleName
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ssm.amazonaws.com
+              AWS:
+                - arn:aws:iam::21321:root
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: PatchInstanceWithRollBackPolicies
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow # Required policies to perform PatchInstanceWithRollBack automation document
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:ContinueUpdateRollback
+                  - cloudformation:SignalResource
+                  - cloudformation:Get*
+                  - cloudformation:Describe*
+                  - iam:createRole
+                  - iam:deleteRole
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRole
+                  - iam:PassRole
+                  - lambda:GetFunction
+                  - lambda:CreateFunction
+                  - lambda:DeleteFunction
+                  - lambda:Invoke*
+                  - tag:GetResources
+                  - ssm:GetAutomationExecution
+                  - ssm:DescribeInstanceInformation
+                  - ssm:ListCommands
+                  - ssm:ListComplianceItems
+                  - ssm:SendCommand
+                  - ssm:ListCommandInvocations
+                  - ssm:GetInventory
+                  - ssm:StartAutomationExecution
+                  - ssm:DescribeInstancePatchStates
+                  - ec2:CreateSnapshot
+                  - ec2:DeleteSnapshot
+                  - ec2:DescribeInstances
+                  - ec2:DescribeSnapshots
+                  - ec2:DescribeVolumes
+                  - ec2:DescribeInstanceAttribute
+                  - ec2:CreateVolume
+                  - ec2:AttachVolume
+                  - ec2:DetachVolume
+                  - ec2:StartInstances
+                  - ec2:StopInstances
+                  - ec2:DescribeTags
+                  - ec2:CreateTags
+                  - s3:PutObject
+                Resource: "*" # TODO - to further restrict the resources
+
+  PatchInstanceWithRollBackRole:
+    Condition: AutomationAccount
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AssumeSSMRoleInOtherAccounts
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow 
+                Action:
+                  - sts:AssumeRole
+                Resource: 
+                  - Fn::Sub: "arn:aws:iam::12321:role/${AssumeRoleName}" 
+                  - Fn::Sub: "arn:aws:iam::132:role/${AssumeRoleName}" 
+                  - Fn::Sub: "arn:aws:iam::1232:role/${AssumeRoleName}" 
+                  - Fn::Sub: "arn:aws:iam::1232:role/${AssumeRoleName}" 
+                  - Fn::Sub: "arn:aws:iam::321:role/${AssumeRoleName}" 
+                  - Fn::Sub: "arn:aws:iam::24532:role/${AssumeRoleName}" 
+                  - Fn::Sub: "arn:aws:iam::23432:role/${AssumeRoleName}" 
+                  - Fn::Sub: "arn:aws:iam::234324:role/${AssumeRoleName}" 
+                  - Fn::Sub: "arn:aws:iam::23432:role/${AssumeRoleName}" 
+                  - Fn::Sub: "arn:aws:iam::23432:role/${AssumeRoleName}" 
+                  - Fn::Sub: "arn:aws:iam::23432:role/${AssumeRoleName}" 
+
+  PatchInstanceWithRollBackLogGroup:
+    Condition: AutomationAccount
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub: "/aws/lambda/${LambdaFunctionNamePrefix}-${SSMDocumentName}"
+      RetentionInDays: 90
+
+  PatchInstanceWithRollBackLambda:
+    Condition: AutomationAccount
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - PatchInstanceWithRollBackLogGroup
+    Properties:
+      Description: Patch instance with security baseline in all accounts
+      Code:
+        S3Bucket:
+          Ref: ArtifactBucketName
+        S3Key:
+          Fn::Sub: "${ArtifactKeyPrefix}/${SSMDocumentName}.zip"
+      FunctionName:
+        Fn::Sub: "${LambdaFunctionNamePrefix}-${SSMDocumentName}"
+      Handler: AWS-PatchInstanceWithRollback.handler
+      MemorySize: 256
+      Role:
+        Fn::GetAtt: [ PatchInstanceWithRollBackRole, Arn ]
+      Runtime: python3.7
+      Timeout: 300
+      Environment:
+        Variables:
+          Region: !Ref 'AWS::Region'
+          AssumeRoleName: !Ref AssumeRoleName
+          SSMDocumentName: !Ref SSMDocumentName
+          hotfixPatchGroupName: "hotfixPatchGroup"
+          hotfixMaxConcurrency: "1"
+          hotfixMaxErrors: "1"
+          ReportBucket: 
+            Fn::ImportValue:
+              Fn::Sub: "${hotfixBaseStack}:HotfixReportBucketName"
+
+Outputs:
+
+  PatchInstanceWithRollBackLambdaArn:
+    Condition: AutomationAccount
+    Value: !GetAtt PatchInstanceWithRollBackLambda.Arn
+    Export: 
+      Name:
+        Fn::Sub: "${AWS::StackName}:PatchInstanceWithRollBackLambdaArn"
+
