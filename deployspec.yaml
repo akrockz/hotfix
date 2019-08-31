@@ -1,0 +1,37 @@
+---
+
+- label: deploy-core-hotfix-base-resources
+  type: create_stack
+  params:
+    template: base.yaml
+    stack_name: "{{ core.Project }}-{{ core.App }}-resources"
+    parameters:
+      ArtifactBucketName: "{{ core.ArtifactBucketName }}"
+      ArtifactKeyPrefix: "{{ core.ArtifactKeyPrefix }}"
+      CodeBuildImage: 1232.dkr.ecr.ap-southeast-1.amazonaws.com/core-codecommit-mini:latest
+      ClientName: "abc"
+      LambdaFunctionNamePrefix: "core-hotfix"
+    accounts:
+      - "2343"  # Automation account
+      - "23433"  # Dev5
+    regions:
+      - ap-southeast-1  # Asia Pacific (Singapore)
+
+- label: deploy-core-hotfix-aws-patchinstancewithrollback
+  type: create_stack
+  depends_on: [ deploy-core-hotfix-base-resources ]
+  params:
+    template: AWS-PatchInstanceWithRollback.yaml
+    stack_name: "{{ core.Project }}-{{ core.App }}-patchinstancewithrollback"
+    parameters:
+      ArtifactBucketName: "{{ core.ArtifactBucketName }}"
+      ArtifactKeyPrefix: "{{ core.ArtifactKeyPrefix }}"
+      LambdaFunctionNamePrefix: "core-hotfix"
+      SSMDocumentName: "AWS-PatchInstanceWithRollback"
+      AssumeRoleName: "AWS-SystemsManager-AutomationExecutionRole"
+      hotfixBaseStack: "core-hotfix-resources"
+    accounts:
+      - "232"  # Automation account
+      - "342"  # Dev5
+    regions:
+      - ap-southeast-1  # Asia Pacific (Singapore)
