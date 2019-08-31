@@ -1,0 +1,258 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Base Resources for core-hotfix'
+
+Parameters:
+
+  ClientName:
+    Type: String
+    Description: Name of client.
+
+  ArtifactBucketName:
+    Type: String
+    Description: Automation bucket name.
+
+  ArtifactKeyPrefix:
+    Type: String
+    Description: Package.sh upload path.
+
+  CodeBuildImage:
+    Description: CodeBuild docker image
+    Type: String
+
+  LambdaFunctionNamePrefix:
+    Type: String
+
+Conditions:
+
+  AutomationAccount: !Equals [ Ref: 'AWS::AccountId', '123421' ] # Automation
+  OtherAccounts:
+    Fn::Not:
+      - Fn::Equals: [ Ref: 'AWS::AccountId', '1232' ] # prod-auto
+
+Resources:
+
+  HotfixReportBucket:
+    Condition: AutomationAccount
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain  # Don't delete the bucket even on stack teardown.
+    Properties:
+      AccessControl: Private
+      BucketName: !Sub "${ClientName}-hotfix-report-${AWS::Region}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Suspended
+
+  HotfixReportBucketPolicy:
+    Condition: AutomationAccount
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: HotfixReportBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "DelegatehotfixAccess"
+            Effect: "Allow"
+            Principal:
+              AWS:
+                - arn:aws:iam::2342:root  # Dev1
+                - arn:aws:iam::234:root  # Dev2
+                - arn:aws:iam::324:root  # Dev3
+                - arn:aws:iam::234:root  # Dev4
+                - arn:aws:iam::234:root  # Dev5
+                - arn:aws:iam::324:root  # NonProd semi-auto
+                - arn:aws:iam::34:root  # NonProd Auto
+                - arn:aws:iam::324:root  # Prod semi-auto
+                - arn:aws:iam::234:root  # Prod auto
+                - arn:aws:iam::234:root  # Services Prod
+                - arn:aws:iam::2343:root  # Services NonProd
+            Action:
+              - s3:PutObject
+              - s3:PutObjectAcl
+            Resource:
+              - !Sub "${HotfixReportBucket.Arn}"
+              - !Sub "${HotfixReportBucket.Arn}/*"
+
+  HotfixRunnerProject:
+    Condition: AutomationAccount
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: core-hotfix-runner
+      Description: Immediate Patching for running fleet
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - { Name: DocumentName, Type: PLAINTEXT, Value: 'AWS-PatchInstanceWithRollback' }
+          - { Name: Tags, Type: PLAINTEXT, Value: 'ssm-rhel,dev5' }
+          - { Name: Accounts, Type: PLAINTEXT, Value: '23432' }
+          - { Name: LambdaFunctionNamePrefix, Type: PLAINTEXT, Value: 'core-hotfix' }
+        Image: !Ref CodeBuildImage
+        Type: LINUX_CONTAINER
+      ServiceRole:
+        Ref: HotfixCodeBuildRole
+      Source:
+        Type: S3
+        Location:
+          Fn::Join: [ "/", [ Ref: ArtifactBucketName, Ref: ArtifactKeyPrefix, "scripts.zip" ]]
+        BuildSpec: |
+          version: 0.2
+          phases:
+            pre_build:
+              commands:
+                - chmod +x ./hotfix-run.sh
+            build:
+              commands:
+                - ./hotfix-run.sh --tags ${Tags} --accounts ${Accounts} --document-name ${DocumentName} --prefix ${LambdaFunctionNamePrefix}
+      Tags:
+        - { Key: Portfolio, Value: core }
+        - { Key: App, Value: hotfix }
+
+  HotfixCodeBuildRole:
+    Condition: AutomationAccount
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: CoreHotFixBaseInlinePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Join ['', ['arn:aws:logs:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':log-group:/aws/codebuild/', 'core-hotfix*']]
+              - Effect: Allow
+                Action:
+                  - codecommit:ListRepositories
+                  - codecommit:GitPull
+                Resource:
+                  - "*"  # All the repos!
+              - Effect: Allow
+                Action:
+                  - s3:List*
+                Resource:
+                  - !Join ['', ['arn:aws:s3:::', !Ref 'ArtifactBucketName' ]]
+              - Effect: Allow
+                Action:
+                  - s3:List*
+                  - s3:GetObject
+                Resource:
+                  - !Join ['', ['arn:aws:s3:::', !Ref 'ArtifactBucketName', '/', !Ref 'ArtifactKeyPrefix', '/*']]
+              - Effect: Allow
+                Action: 
+                  - lambda:InvokeFunction
+                Resource:
+                  # - !Join ['', ['arn:aws:lambda:::', 'function:' , !Ref LambdaFunctionNamePrefix, '*']]
+                  - "*"
+
+  #####
+  # Notification for System Manager
+  #####
+
+  SSMTopic:
+    Condition: OtherAccounts
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Ref LambdaFunctionNamePrefix
+      DisplayName: !Ref LambdaFunctionNamePrefix
+      Subscription:
+        - Endpoint: abc@com
+          Protocol: email
+
+  SSMAutomationEventRule: 
+    Condition: OtherAccounts
+    DependsOn:
+      - SSMTopic
+    Type: "AWS::Events::Rule"
+    Properties: 
+      Description: "Trigger SSM SNS Topic when SSM Automation completed"
+      EventPattern: 
+        source: 
+          - "aws.ssm"
+        detail-type: 
+          - "EC2 Automation Execution Status-change Notification"
+        detail: 
+          Status:
+            - Success
+            - Failed
+            - Cancelled
+      State: "ENABLED"
+      Targets: 
+        - Arn: !Ref SSMTopic
+          Id: "SSMAutomationEventRuleTopicId"
+
+  SSMRunCommandEventRule: 
+    Condition: OtherAccounts
+    DependsOn:
+      - SSMTopic
+    Type: "AWS::Events::Rule"
+    Properties: 
+      Description: "Trigger SSM SNS Topic when SSM Run Command is triggered"
+      EventPattern: 
+        source: 
+          - "aws.ssm"
+        detail-type: 
+          - "EC2 Command Status-change Notification"
+        detail: 
+          Status:
+            - Success
+            - Failed
+            - Cancelled
+      State: "ENABLED"
+      Targets: 
+        - Arn: !Ref SSMTopic
+          Id: "SSMRunCommandEventRuleTopicId"
+
+  SSMTopicPolicy:
+    Condition: OtherAccounts
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Id: Id1
+        Version: '2012-10-17'
+        Statement:
+        - Sid: Sid1
+          Effect: Allow
+          Principal:
+            Service:
+            - 'events.amazonaws.com' # Allow CloudWatch Events
+          Action: 'sns:Publish'
+          Resource: !Ref SSMTopic
+      Topics:
+      - !Ref SSMTopic
+
+Outputs:
+
+  HotfixReportBucketName:
+    Condition: AutomationAccount
+    Value: !Ref 'HotfixReportBucket'
+    Export: 
+      Name:
+        Fn::Sub: "${AWS::StackName}:HotfixReportBucketName"
+    Description: Name of the hotfix bucket.
+
+  HotfixCodeBuildProjectName:
+    Condition: AutomationAccount
+    Value: !Ref HotfixRunnerProject
+    Export: 
+      Name:
+        Fn::Sub: "${AWS::StackName}:HotfixCodeBuildProjectName"
+    Description: Codebuild project for core-hotfix
